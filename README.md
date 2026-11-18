@@ -1,6 +1,16 @@
 # ESP32 Wi‑Fi CSI Radar
 
-ESP32 DevKit V1 + W5500 Ethernet: Wi‑Fi CSI telemetry, TinyML-ready anomaly detection, UDP stream to PC, Windows control app.
+ESP32 DevKit V1 + W5500 Ethernet. W5500 has a fixed IP address, so any PC on the same LAN can connect to the radar.
+
+## Network
+
+- W5500 / ESP32 IP: `192.168.1.23`
+- Gateway: `192.168.1.1`
+- Subnet mask: `255.255.255.0`
+- Radar TCP server port: `9999`
+- PC app connects to: `192.168.1.23:9999`
+
+No PC-side IP configuration is required: the PC app connects directly to the W5500 address.
 
 ## Build
 
@@ -27,4 +37,6 @@ Run `pc_app\install.bat` once, then `pc_app\start_radar.bat`.
 | INT | GPIO4 |
 | RST | GPIO33 |
 
-Set PC IP in `main/main.c` (`RADAR_PC_IP`) and UDP port 9999.
+## Important
+
+For motion detection, a second Wi‑Fi transmitter is required: router, phone hotspot, or another ESP32. The ESP32 analyzes Wi‑Fi CSI changes caused by movement.

@@ -14,8 +14,12 @@
 
 #define WIFI_SSID CONFIG_ESP_WIFI_SSID
 #define WIFI_PASS CONFIG_ESP_WIFI_PASSWORD
-#define RADAR_PC_IP "192.168.1.50"
-#define RADAR_UDP_PORT 9999
+
+/* Static W5500 address: any PC on the same LAN can connect to it. */
+#define W5500_IP "192.168.1.23"
+#define W5500_GW "192.168.1.1"
+#define W5500_MASK "255.255.255.0"
+#define RADAR_TCP_PORT 9999
 
 #define ETH_MOSI_GPIO 23
 #define ETH_MISO_GPIO 19
@@ -25,19 +29,19 @@
 #define ETH_RST_GPIO 33
 
 static const char *TAG = "csi_radar";
-static int udp_sock = -1;
-static struct sockaddr_in pc_addr;
 static volatile uint32_t csi_count = 0;
+static int listen_sock = -1;
+static int client_sock = -1;
 
 static void csi_rx_cb(void *ctx, wifi_csi_info_t *info)
 {
     csi_count++;
-    if (udp_sock < 0 || !info->buf) return;
+    if (client_sock < 0 || !info->buf) return;
     char msg[256];
     int n = snprintf(msg, sizeof(msg),
         "{\"seq\":%u,\"rssi\":%d,\"len\":%u,\"first_word\":%u}\n",
-        csi_count, info->rx_ctrl.rssi, info->buf_len, info->buf ? info->buf[0] : 0);
-    sendto(udp_sock, msg, n, 0, (struct sockaddr *)&pc_addr, sizeof(pc_addr));
+        csi_count, info->rx_ctrl.rssi, info->buf_len, info->buf[0]);
+    send(client_sock, msg, n, 0);
 }
 
 static void wifi_init(void)
@@ -86,29 +90,56 @@ static void eth_init(void)
     esp_eth_config_t eth_cfg = ETH_DEFAULT_CONFIG(mac_handle, phy_handle);
     esp_eth_handle_t eth_handle;
     ESP_ERROR_CHECK(esp_eth_driver_install(&eth_cfg, &eth_handle));
+
     esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_ETH();
     esp_netif_t *eth_netif = esp_netif_new(&netif_cfg);
     ESP_ERROR_CHECK(esp_netif_attach(eth_netif, esp_eth_new_netif_glue(eth_handle)));
     ESP_ERROR_CHECK(esp_eth_start(eth_handle));
+
+    /* Wait briefly for the interface, then apply the static address. */
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    ESP_ERROR_CHECK(esp_netif_dhcpc_stop(eth_netif));
+    esp_netif_ip_info_t ip = { 0 };
+    ip.ip.addr = ipaddr_addr(W5500_IP);
+    ip.gw.addr = ipaddr_addr(W5500_GW);
+    ip.netmask.addr = ipaddr_addr(W5500_MASK);
+    ESP_ERROR_CHECK(esp_netif_set_ip_info(eth_netif, &ip));
 }
 
-static void udp_init(void)
+static void tcp_server_task(void *arg)
 {
-    udp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    memset(&pc_addr, 0, sizeof(pc_addr));
-    pc_addr.sin_family = AF_INET;
-    pc_addr.sin_port = htons(RADAR_UDP_PORT);
-    inet_aton(RADAR_PC_IP, &pc_addr.sin_addr);
+    struct sockaddr_in addr = { 0 };
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(RADAR_TCP_PORT);
+
+    listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    int opt = 1;
+    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    ESP_ERROR_CHECK(bind(listen_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0 ? ESP_FAIL : ESP_OK);
+    ESP_ERROR_CHECK(listen(listen_sock, 1) < 0 ? ESP_FAIL : ESP_OK);
+    ESP_LOGI(TAG, "Radar TCP server ready at %s:%d", W5500_IP, RADAR_TCP_PORT);
+
+    while (1) {
+        client_sock = accept(listen_sock, NULL, NULL);
+        if (client_sock < 0) continue;
+        ESP_LOGI(TAG, "PC connected");
+        char buf[64];
+        while (recv(client_sock, buf, sizeof(buf), 0) > 0) { }
+        close(client_sock);
+        client_sock = -1;
+        ESP_LOGI(TAG, "PC disconnected");
+    }
 }
 
 void app_main(void)
 {
     ESP_ERROR_CHECK(nvs_flash_init());
-    udp_init();
     eth_init();
     wifi_init();
+    xTaskCreate(tcp_server_task, "tcp_server", 4096, NULL, 5, NULL);
     while (1) {
-        ESP_LOGI(TAG, "CSI packets: %u", csi_count);
+        ESP_LOGI(TAG, "CSI packets: %u, client: %s", csi_count, client_sock >= 0 ? "connected" : "none");
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
